@@ -387,7 +387,7 @@ class FFCResNetGenerator(nn.Module):
                 slot_context = slots.mean(dim=1)  # [B, D]
                 feat_bias = self.cosa_to_feat(slot_context).view(b, c, 1, 1)
                 x = x + feat_bias
-                self._last_cosa_losses = self.cosa_prior.compute_losses(token_feats, aux)
+                self._last_cosa_losses = self.cosa_prior.compute_losses(aux)
         return x
 
     def get_last_aux_losses(self):

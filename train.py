@@ -107,7 +107,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         device = gaussians.get_xyz.device
         dummy_feats = torch.randn(1, 128, 256, device=device)
         _, cosa_aux = gaussians.cosa_prior(dummy_feats)
-        cosa_losses = gaussians.cosa_prior.losses(cosa_aux)
+        cosa_losses = gaussians.cosa_prior.compute_losses(cosa_aux)
         loss = loss + 0.01 * cosa_losses["cosa_commitment"] + 0.001 * cosa_losses["cosa_usage"]
 
         loss.backward()
