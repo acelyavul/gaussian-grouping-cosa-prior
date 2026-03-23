@@ -139,6 +139,7 @@ class DefaultInpaintingTrainingModule(BaseInpaintingTrainingModule):
         if self.loss_resnet_pl is not None:
             resnet_pl_value = self.loss_resnet_pl(predicted_img, img)
             total_loss = total_loss + resnet_pl_value
+            metrics['gen_resnet_pl'] = resnet_pl_value
 
         cosa_cfg = self.config.losses.get('cosa', None)
         if cosa_cfg is not None and hasattr(self.generator, 'get_last_aux_losses'):

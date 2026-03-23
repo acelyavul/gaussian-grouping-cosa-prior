@@ -60,7 +60,7 @@ class CoSAPrior(nn.Module):
         }
         return refined_slots, aux
 
-    def losses(self, aux):
+    def compute_losses(self, aux):
         pooled = aux["pooled_tokens"]
         dict_embed = aux["dict_embed"]
         weights = aux["dict_weights"]
