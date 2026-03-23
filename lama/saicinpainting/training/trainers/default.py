@@ -139,7 +139,21 @@ class DefaultInpaintingTrainingModule(BaseInpaintingTrainingModule):
         if self.loss_resnet_pl is not None:
             resnet_pl_value = self.loss_resnet_pl(predicted_img, img)
             total_loss = total_loss + resnet_pl_value
-            metrics['gen_resnet_pl'] = resnet_pl_value
+
+        cosa_cfg = self.config.losses.get('cosa', None)
+        if cosa_cfg is not None and hasattr(self.generator, 'get_last_aux_losses'):
+            cosa_losses = self.generator.get_last_aux_losses() or {}
+            if cosa_losses:
+                cosa_weight = float(cosa_cfg.get('weight', 0.0))
+                commit_weight = float(cosa_cfg.get('commitment_weight', 1.0))
+                usage_weight = float(cosa_cfg.get('usage_weight', 1.0))
+                cosa_commitment = cosa_losses.get('cosa_commitment', 0.0)
+                cosa_usage = cosa_losses.get('cosa_usage', 0.0)
+                cosa_total = cosa_weight * (commit_weight * cosa_commitment + usage_weight * cosa_usage)
+                total_loss = total_loss + cosa_total
+                metrics['gen_cosa'] = cosa_total
+                metrics['gen_cosa_commitment'] = cosa_commitment
+                metrics['gen_cosa_usage'] = cosa_usage
 
         return total_loss, metrics
 

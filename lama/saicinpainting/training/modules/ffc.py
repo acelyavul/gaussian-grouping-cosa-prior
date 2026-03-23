@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from models.cosa_prior import CoSAPrior
 from saicinpainting.training.modules.base import get_activation, BaseDiscriminator
 from saicinpainting.training.modules.spatial_transform import LearnableSpatialTransformWrapper
 from saicinpainting.training.modules.squeeze_excitation import SELayer
@@ -308,7 +309,8 @@ class FFCResNetGenerator(nn.Module):
                  up_norm_layer=nn.BatchNorm2d, up_activation=nn.ReLU(True),
                  init_conv_kwargs={}, downsample_conv_kwargs={}, resnet_conv_kwargs={},
                  spatial_transform_layers=None, spatial_transform_kwargs={},
-                 add_out_act=True, max_features=1024, out_ffc=False, out_ffc_kwargs={}):
+                 add_out_act=True, max_features=1024, out_ffc=False, out_ffc_kwargs={},
+                 use_cosa_prior=False, cosa_prior_kwargs=None):
         assert (n_blocks >= 0)
         super().__init__()
 
@@ -362,9 +364,34 @@ class FFCResNetGenerator(nn.Module):
         if add_out_act:
             model.append(get_activation('tanh' if add_out_act is True else add_out_act))
         self.model = nn.Sequential(*model)
+        self.use_cosa_prior = use_cosa_prior
+        self._last_cosa_losses = {}
+
+        if self.use_cosa_prior:
+            cosa_prior_kwargs = cosa_prior_kwargs or {}
+            self.cosa_prior = CoSAPrior(input_dim=feats_num_bottleneck, **cosa_prior_kwargs)
+            self.cosa_to_feat = nn.Linear(self.cosa_prior.slot_dim, feats_num_bottleneck)
+        else:
+            self.cosa_prior = None
+            self.cosa_to_feat = None
 
     def forward(self, input):
-        return self.model(input)
+        self._last_cosa_losses = {}
+        x = input
+        for layer in self.model:
+            x = layer(x)
+            if self.use_cosa_prior and isinstance(layer, ConcatTupleLayer):
+                b, c, h, w = x.shape
+                token_feats = x.flatten(2).transpose(1, 2)  # [B, HW, C]
+                slots, aux = self.cosa_prior(token_feats)
+                slot_context = slots.mean(dim=1)  # [B, D]
+                feat_bias = self.cosa_to_feat(slot_context).view(b, c, 1, 1)
+                x = x + feat_bias
+                self._last_cosa_losses = self.cosa_prior.compute_losses(token_feats, aux)
+        return x
+
+    def get_last_aux_losses(self):
+        return self._last_cosa_losses
 
 
 class FFCNLayerDiscriminator(BaseDiscriminator):

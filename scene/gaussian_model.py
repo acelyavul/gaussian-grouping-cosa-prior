@@ -3,7 +3,7 @@
 # All rights reserved.
 #
 # ------------------------------------------------------------------------
-# Modified from codes in Gaussian-Splatting 
+# Modified from codes in Gaussian-Splatting
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 
 import torch
@@ -18,6 +18,7 @@ from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from scipy.spatial import KDTree
+from models.cosa_prior import CoSAPrior
 
 class GaussianModel:
 
@@ -27,7 +28,7 @@ class GaussianModel:
             actual_covariance = L @ L.transpose(1, 2)
             symm = strip_symmetric(actual_covariance)
             return symm
-        
+
         self.scaling_activation = torch.exp
         self.scaling_inverse_activation = torch.log
 
@@ -41,7 +42,7 @@ class GaussianModel:
 
     def __init__(self, sh_degree : int):
         self.active_sh_degree = 0
-        self.max_sh_degree = sh_degree  
+        self.max_sh_degree = sh_degree
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
@@ -56,6 +57,13 @@ class GaussianModel:
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
+        self.cosa_prior = CoSAPrior(
+            input_dim=256,
+            slot_dim=16,
+            num_slots=8,
+            num_dict_entries=64,
+            iters=3,
+        ).cuda()
         self.setup_functions()
 
     def capture(self):
@@ -74,20 +82,20 @@ class GaussianModel:
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
         )
-    
+
     def restore(self, model_args, training_args):
-        (self.active_sh_degree, 
-        self._xyz, 
-        self._features_dc, 
+        (self.active_sh_degree,
+        self._xyz,
+        self._features_dc,
         self._features_rest,
-        self._scaling, 
-        self._rotation, 
+        self._scaling,
+        self._rotation,
         self._opacity,
         self._objects_dc,
-        self.max_radii2D, 
-        xyz_gradient_accum, 
+        self.max_radii2D,
+        xyz_gradient_accum,
         denom,
-        opt_dict, 
+        opt_dict,
         self.spatial_lr_scale) = model_args
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
@@ -97,29 +105,29 @@ class GaussianModel:
     @property
     def get_scaling(self):
         return self.scaling_activation(self._scaling)
-    
+
     @property
     def get_rotation(self):
         return self.rotation_activation(self._rotation)
-    
+
     @property
     def get_xyz(self):
         return self._xyz
-    
+
     @property
     def get_features(self):
         features_dc = self._features_dc
         features_rest = self._features_rest
         return torch.cat((features_dc, features_rest), dim=1)
-    
+
     @property
     def get_objects(self):
         return self._objects_dc
-    
+
     @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
-    
+
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
@@ -170,6 +178,7 @@ class GaussianModel:
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
             {'params': [self._objects_dc], 'lr': training_args.feature_lr, "name": "obj_dc"},
+            {'params': self.cosa_prior.parameters(), 'lr': training_args.feature_lr, "name": "cosa_prior"},
         ]
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -177,14 +186,14 @@ class GaussianModel:
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
-    
+
     def finetune_setup(self, training_args, mask3d):
         # Define a function that applies the mask to the gradients
         def mask_hook(grad):
             return grad * mask3d
         def mask_hook2(grad):
             return grad * mask3d.squeeze(-1)
-        
+
 
         # Register the hook to the parameter (only once!)
         hook_xyz = self._xyz.register_hook(mask_hook2)
@@ -200,7 +209,7 @@ class GaussianModel:
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        
+
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
             {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
@@ -246,7 +255,7 @@ class GaussianModel:
         def initialize_new_features(features, num_new_points, mask_xyz_values, distance_threshold=0.25, max_distance_threshold=1, k=5):
             """Initialize new points for multiple features based on neighbouring points in the remaining area."""
             new_features = {}
-            
+
             if num_new_points == 0:
                 for key in features:
                     new_features[key] = torch.empty((0, *features[key].shape[1:]), device=features[key].device)
@@ -255,10 +264,10 @@ class GaussianModel:
             # Get remaining points from features
             remaining_xyz_values = features["xyz"]
             remaining_xyz_values_np = remaining_xyz_values.cpu().numpy()
-            
+
             # Build a KD-Tree for fast nearest-neighbor lookup
             kdtree = KDTree(remaining_xyz_values_np)
-            
+
             # Sample random points from mask_xyz_values as query points
             mask_xyz_values_np = mask_xyz_values.cpu().numpy()
             query_points = mask_xyz_values_np
@@ -271,7 +280,7 @@ class GaussianModel:
             for key, feature in features.items():
                 # Convert feature to numpy array
                 feature_np = feature.cpu().numpy()
-                
+
                 # If we have valid neighbors, calculate the mean of neighbor points
                 if feature_np.ndim == 2:
                     neighbor_points = feature_np[selected_indices]
@@ -280,12 +289,12 @@ class GaussianModel:
                 else:
                     raise ValueError(f"Unsupported feature dimension: {feature_np.ndim}")
                 new_points_np = np.mean(neighbor_points, axis=1)
-                
+
                 # Convert back to tensor
                 new_features[key] = torch.tensor(new_points_np, device=feature.device, dtype=feature.dtype)
-            
+
             return new_features['xyz'], new_features['features_dc'], new_features['scaling'], new_features['objects_dc'], new_features['features_rest'], new_features['opacity'], new_features['rotation']
-        
+
         mask3d = ~mask3d.bool().squeeze()
         mask_xyz_values = self._xyz[~mask3d]
 
@@ -568,7 +577,7 @@ class GaussianModel:
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
-        
+
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
