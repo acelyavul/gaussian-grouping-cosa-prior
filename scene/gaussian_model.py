@@ -57,14 +57,19 @@ class GaussianModel:
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
-        self.cosa_prior = CoSAPrior(
-            input_dim=256,
-            slot_dim=16,
-            num_slots=8,
-            num_dict_entries=64,
-            iters=3,
-        ).cuda()
+        self.use_cosa_prior = False
+        self.cosa_prior = None
         self.setup_functions()
+
+    def setup_cosa(self, input_dim=256, slot_dim=16, num_slots=8, num_dict_entries=64, iters=3):
+        self.cosa_prior = CoSAPrior(
+            input_dim=input_dim,
+            slot_dim=slot_dim,
+            num_slots=num_slots,
+            num_dict_entries=num_dict_entries,
+            iters=iters,
+        ).cuda()
+        self.use_cosa_prior = True
 
     def capture(self):
         return (
@@ -178,7 +183,6 @@ class GaussianModel:
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
             {'params': [self._objects_dc], 'lr': training_args.feature_lr, "name": "obj_dc"},
-            {'params': self.cosa_prior.parameters(), 'lr': training_args.feature_lr, "name": "cosa_prior"},
         ]
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)

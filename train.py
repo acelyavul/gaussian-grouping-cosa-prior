@@ -28,6 +28,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
+    cosa_optimizer = None
+    if args.use_cosa_prior:
+        gaussians.setup_cosa(
+            input_dim=args.cosa_input_dim,
+            slot_dim=args.cosa_slot_dim,
+            num_slots=args.cosa_num_slots,
+            num_dict_entries=args.cosa_num_dict_entries,
+            iters=args.cosa_iters,
+        )
+        cosa_optimizer = torch.optim.Adam(
+            gaussians.cosa_prior.parameters(),
+            lr=1e-4,
+            eps=1e-15
+        )
     num_classes = dataset.num_classes
     print("Num classes: ",num_classes)
     classifier = torch.nn.Conv2d(gaussians.num_objects, num_classes, kernel_size=1)
@@ -92,23 +106,49 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
+        loss_cosa = torch.tensor(0.0, device="cuda")
+        loss_cosa_usage = torch.tensor(0.0, device="cuda")
+
+        if args.use_cosa_prior and gaussians.use_cosa_prior and iteration >= args.cosa_start_iter:
+            dummy_feats = torch.randn(
+                1,
+                args.cosa_dummy_tokens,
+                args.cosa_input_dim,
+                device="cuda"
+            )
+            _, cosa_aux = gaussians.cosa_prior(dummy_feats)
+            cosa_losses = gaussians.cosa_prior.compute_losses(cosa_aux)
+            loss_cosa = cosa_losses["cosa_commitment"]
+            loss_cosa_usage = cosa_losses["cosa_usage"]
 
         loss_obj_3d = None
         if iteration % opt.reg3d_interval == 0:
-            # regularize at certain intervals
             logits3d = classifier(gaussians._objects_dc.permute(2,0,1))
             prob_obj3d = torch.softmax(logits3d,dim=0).squeeze().permute(1,0)
-            loss_obj_3d = loss_cls_3d(gaussians._xyz.squeeze().detach(), prob_obj3d, opt.reg3d_k, opt.reg3d_lambda_val, opt.reg3d_max_points, opt.reg3d_sample_size)
-            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image)) + loss_obj + loss_obj_3d
+            loss_obj_3d = loss_cls_3d(
+                gaussians._xyz.squeeze().detach(),
+                prob_obj3d,
+                opt.reg3d_k,
+                opt.reg3d_lambda_val,
+                opt.reg3d_max_points,
+                opt.reg3d_sample_size
+            )
+            loss = (
+                (1.0 - opt.lambda_dssim) * Ll1
+                + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+                + loss_obj
+                + loss_obj_3d
+                + args.cosa_loss_weight * loss_cosa
+                + args.cosa_usage_weight * loss_cosa_usage
+            )
         else:
-            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image)) + loss_obj
-
-        # Minimal CoSA prior PoC branch (dummy features for integration test).
-        device = gaussians.get_xyz.device
-        dummy_feats = torch.randn(1, 128, 256, device=device)
-        _, cosa_aux = gaussians.cosa_prior(dummy_feats)
-        cosa_losses = gaussians.cosa_prior.compute_losses(cosa_aux)
-        loss = loss + 0.01 * cosa_losses["cosa_commitment"] + 0.001 * cosa_losses["cosa_usage"]
+            loss = (
+                (1.0 - opt.lambda_dssim) * Ll1
+                + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+                + loss_obj
+                + args.cosa_loss_weight * loss_cosa
+                + args.cosa_usage_weight * loss_cosa_usage
+            )
 
         loss.backward()
         iter_end.record()
@@ -148,6 +188,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.optimizer.zero_grad(set_to_none = True)
                 cls_optimizer.step()
                 cls_optimizer.zero_grad()
+
+                if cosa_optimizer is not None:
+                    cosa_optimizer.step()
+                    cosa_optimizer.zero_grad(set_to_none=True)
 
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
@@ -223,6 +267,16 @@ if __name__ == "__main__":
     # Add an argument for the configuration file
     parser.add_argument("--config_file", type=str, default="config.json", help="Path to the configuration file")
     parser.add_argument("--use_wandb", action='store_true', default=False, help="Use wandb to record loss value")
+    parser.add_argument("--use_cosa_prior", action="store_true", default=False)
+    parser.add_argument("--cosa_input_dim", type=int, default=256)
+    parser.add_argument("--cosa_slot_dim", type=int, default=16)
+    parser.add_argument("--cosa_num_slots", type=int, default=8)
+    parser.add_argument("--cosa_num_dict_entries", type=int, default=64)
+    parser.add_argument("--cosa_iters", type=int, default=3)
+    parser.add_argument("--cosa_loss_weight", type=float, default=0.01)
+    parser.add_argument("--cosa_usage_weight", type=float, default=0.001)
+    parser.add_argument("--cosa_start_iter", type=int, default=0)
+    parser.add_argument("--cosa_dummy_tokens", type=int, default=128)
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
